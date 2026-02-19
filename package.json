@@ -1,0 +1,42 @@
+{
+  "name": "proclean",
+  "version": "0.1.0",
+  "description": "Interactive TUI for killing orphan processes (PPID=1)",
+  "type": "module",
+  "bin": {
+    "proclean": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "start": "node dist/cli.js"
+  },
+  "keywords": [
+    "process",
+    "orphan",
+    "kill",
+    "tui",
+    "cli",
+    "ink"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@inkjs/ui": "^2.0.0",
+    "chalk": "^5.4.1",
+    "ink": "^6.0.0",
+    "meow": "^13.0.0",
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.0",
+    "@types/react": "^19.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.7.0"
+  }
+}
