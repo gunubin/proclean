@@ -1,10 +1,10 @@
 # proclean
 
-**Interactive TUI for finding and killing orphan processes (PPID=1).**
+**Interactive orphan process killer powered by fzf.**
 
 ![Node.js](https://img.shields.io/badge/node-%3E%3D18-green)
 ![TypeScript](https://img.shields.io/badge/typescript-5.7-blue)
-![Ink](https://img.shields.io/badge/ink-6-magenta)
+![fzf](https://img.shields.io/badge/fzf-required-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
 
@@ -15,22 +15,26 @@ Closing tmux panes often leaves subprocess orphans (Claude Code, node, cargo, et
 ## Features
 
 - **Two modes** -- `dev` (whitelist: Claude Code, node, cargo, rbenv) and `all` (blacklist: system processes only)
-- **Interactive TUI** -- Navigate with j/k, select with space, bulk kill with enter
-- **Search** -- `/` to filter by command name or PID
-- **Detail pane** -- Tab to toggle full command line and process info
-- **Safe kill** -- Confirmation prompt before SIGTERM, with result reporting
-- **Scroll** -- Handles large process lists with viewport scrolling
+- **fzf-powered UI** -- Fuzzy search, multi-select, real-time preview
+- **Detail preview** -- Process info, command line, open files in side pane
+- **Safe kill** -- SIGTERM with automatic list reload
+- **Catppuccin Frappe theme** -- Consistent color scheme
+
+## Prerequisites
+
+- [fzf](https://github.com/junegunn/fzf) (>= 0.57)
+
+```bash
+brew install fzf
+```
 
 ## Installation
 
 ```bash
-npm install -g proclean
-```
-
-Or run directly:
-
-```bash
-npx proclean
+git clone https://github.com/gunubin/proclean.git
+cd proclean
+npm install && npm run build
+npm link
 ```
 
 ## Usage
@@ -48,21 +52,18 @@ proclean -a
 Bind to a key for quick access:
 
 ```tmux
-bind P display-popup -E -w 50% -h 50% "npx proclean"
+bind P display-popup -E -w 50% -h 50% "proclean"
 ```
 
 ### Keybindings
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Move cursor down / up |
-| `Space` | Toggle selection |
-| `a` | Select / deselect all |
-| `Enter` | Kill selected (or highlighted) |
-| `/` | Search mode |
-| `Tab` | Toggle detail pane |
-| `q` | Quit |
-| `r` | Refresh (after kill) |
+| `TAB` | Toggle selection |
+| `Enter` | Kill selected processes |
+| `Ctrl-A` | Select / deselect all |
+| `Ctrl-C` | Quit |
+| Type to search | Fuzzy filter |
 
 ## Filter Logic
 
@@ -87,20 +88,9 @@ Blacklist -- shows everything except:
 
 ## Tech Stack
 
-- [Ink 6](https://github.com/vadimdemedes/ink) + React 19 (TUI framework)
-- [@inkjs/ui 2](https://github.com/vadimdemedes/ink-ui) (Spinner)
+- [fzf](https://github.com/junegunn/fzf) (interactive UI)
 - [meow](https://github.com/sindresorhus/meow) (CLI args)
 - [tsup](https://github.com/egoist/tsup) (ESM build)
-
-## Development
-
-```bash
-git clone https://github.com/gunubin/proclean.git
-cd proclean
-npm install
-npm run build
-node dist/cli.js
-```
 
 ## License
 
