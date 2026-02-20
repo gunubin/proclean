@@ -10,17 +10,3 @@ export interface ProcessInfo {
 }
 
 export type Mode = "dev" | "all";
-
-export type AppPhase =
-  | "loading"
-  | "list"
-  | "confirm"
-  | "killing"
-  | "done"
-  | "empty";
-
-export interface KillResult {
-  pid: number;
-  success: boolean;
-  error?: string;
-}
