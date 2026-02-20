@@ -59,7 +59,7 @@ function formatHeader(): string {
   return `${c.dim}${"PID".padEnd(7)} ${"CPU%".padStart(5)}  ${"MEM".padStart(6)}  ${"ELAPSED".padStart(14)}  COMMAND${c.reset}`;
 }
 
-function formatLine(proc: ProcessInfo): string {
+function formatLine(proc: ProcessInfo, ttyOrphan = false): string {
   const cpu = cpuColor(proc.cpu);
   const cpuStr = proc.cpu.toFixed(1).padStart(5);
   const mem = formatMem(proc.rss).padStart(6);
@@ -69,13 +69,32 @@ function formatLine(proc: ProcessInfo): string {
       ? proc.command.slice(0, 47) + "..."
       : proc.command;
 
-  return [
+  const line = [
     `${c.bold}${String(proc.pid).padEnd(7)}${c.reset}`,
     `${cpu}${cpuStr}${c.reset}`,
     ` ${mem}`,
     `  ${c.dim}${elapsed}${c.reset}`,
     `  ${cmd}`,
   ].join("");
+
+  // TTY-attached orphans: wrap entire line in yellow for visual distinction
+  return ttyOrphan ? `${c.yellow}${line}${c.reset}` : line;
+}
+
+function splitByTty(processes: ProcessInfo[]): {
+  normal: ProcessInfo[];
+  ttyAttached: ProcessInfo[];
+} {
+  const normal: ProcessInfo[] = [];
+  const ttyAttached: ProcessInfo[] = [];
+  for (const p of processes) {
+    if (p.tty === "??") {
+      normal.push(p);
+    } else {
+      ttyAttached.push(p);
+    }
+  }
+  return { normal, ttyAttached };
 }
 
 // ── Wait for any keypress (raw mode) ─────────────────────
@@ -99,6 +118,7 @@ function waitForKey(): Promise<void> {
 function buildPreviewCmd(): string {
   const script = [
     'pid=$1',
+    'case "$pid" in ""|*[!0-9]*) printf "\\n\\033[2m  Not a process line\\033[0m\\n"; exit 0 ;; esac',
     'w=${FZF_PREVIEW_COLUMNS:-50}',
     'hr() { printf "\\033[1;36m  "; printf "─%.0s" $(seq 1 $((w - 4))); printf "\\033[0m\\n"; }',
     'section() { local t=" $1 "; local tl=${#t}; local rl=$((w - 4 - tl)); printf "\\033[1;36m  ─── %s " "$1"; printf "─%.0s" $(seq 1 $rl); printf "\\033[0m\\n"; }',
@@ -148,7 +168,20 @@ async function listMode(mode: Mode): Promise<void> {
   const all = await getOrphanProcesses();
   const filter = mode === "dev" ? devFilter : allFilter;
   const processes = all.filter(filter);
-  const lines = [formatHeader(), ...processes.map(formatLine)];
+  const { normal, ttyAttached } = splitByTty(processes);
+
+  const lines: string[] = [formatHeader()];
+  if (processes.length === 0) {
+    lines.push(`${c.dim}  No orphan processes found.${c.reset}`);
+  } else {
+    lines.push(...normal.map((p) => formatLine(p)));
+    if (ttyAttached.length > 0) {
+      lines.push(
+        `${c.yellow}${c.bold}  ⚠ TTY-attached orphans (may still be active)${c.reset}`,
+      );
+      lines.push(...ttyAttached.map((p) => formatLine(p, true)));
+    }
+  }
   process.stdout.write(lines.join("\n") + "\n");
 }
 
@@ -175,22 +208,31 @@ async function main() {
   const all = await getOrphanProcesses();
   const filter = mode === "dev" ? devFilter : allFilter;
   const processes = all.filter(filter);
-
-  if (processes.length === 0) {
-    console.log(`${c.green}✓${c.reset} No orphan processes found. ${c.dim}(${mode} mode)${c.reset}`);
-    console.log(`${c.dim}Press any key to close${c.reset}`);
-    await waitForKey();
-    process.exit(0);
-  }
+  const { normal, ttyAttached } = splitByTty(processes);
 
   // Build reload command for fzf
   const scriptPath = fileURLToPath(import.meta.url);
   const modeFlag = mode === "all" ? " -a" : "";
-  const reloadCmd = `node ${scriptPath} --_list${modeFlag}`;
+  const reloadCmd = `node "${scriptPath}" --_list${modeFlag}`;
 
   // Table header + data lines
-  const lines = [formatHeader(), ...processes.map(formatLine)];
+  const lines: string[] = [formatHeader()];
+  if (processes.length === 0) {
+    lines.push(`${c.dim}  No orphan processes found.${c.reset}`);
+  } else {
+    lines.push(...normal.map((p) => formatLine(p)));
+    if (ttyAttached.length > 0) {
+      lines.push(
+        `${c.yellow}${c.bold}  ⚠ TTY-attached orphans (may still be active)${c.reset}`,
+      );
+      lines.push(...ttyAttached.map((p) => formatLine(p, true)));
+    }
+  }
   const input = lines.join("\n");
+  const listLabel =
+    processes.length === 0
+      ? " 0 orphan processes "
+      : ` ${processes.length} orphan processes `;
 
   // Spawn fzf (--style=full matching tmux popup conventions)
   const fzf = spawn(
@@ -203,7 +245,7 @@ async function main() {
       "--input-label",
       ` proclean [${mode}] `,
       "--list-label",
-      ` ${processes.length} orphan processes `,
+      listLabel,
       "--header-label",
       " TAB:select  Enter:kill  ^A:all  ^C:quit ",
       "--preview",
@@ -219,7 +261,7 @@ async function main() {
       "--bind",
       "ctrl-a:toggle-all",
       "--bind",
-      `enter:execute-silent(bash -c 'kill -TERM {+1} 2>/dev/null')+reload(${reloadCmd})`,
+      `enter:execute-silent(bash -c 'for p in {+1}; do case "$p" in ""|*[!0-9]*) continue ;; esac; kill -TERM $p 2>/dev/null; done; sleep 0.3; for p in {+1}; do case "$p" in ""|*[!0-9]*) continue ;; esac; kill -0 $p 2>/dev/null && kill -9 $p 2>/dev/null; done; sleep 0.1')+reload(${reloadCmd})`,
       "--color",
       "spinner:#F2D5CF,hl:#E78284",
       "--color",

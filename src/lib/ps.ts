@@ -24,8 +24,8 @@ export async function getOrphanProcesses(): Promise<ProcessInfo[]> {
     const parsed = parsePsLine(trimmed);
     if (!parsed) continue;
 
-    // Only orphan processes (PPID=1) with no controlling terminal
-    if (parsed.ppid === 1 && parsed.tty === "??") {
+    // Orphan processes (PPID=1) — includes both detached and TTY-attached
+    if (parsed.ppid === 1) {
       processes.push(parsed);
     }
   }
