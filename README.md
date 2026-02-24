@@ -31,10 +31,11 @@ brew install fzf
 ## Installation
 
 ```bash
-git clone https://github.com/gunubin/proclean.git
-cd proclean
-npm install && npm run build
-npm link
+# npx で即実行（インストール不要）
+npx proclean
+
+# またはグローバルインストール
+npm install -g proclean
 ```
 
 ## Usage
@@ -91,6 +92,15 @@ Blacklist -- shows everything except:
 - [fzf](https://github.com/junegunn/fzf) (interactive UI)
 - [meow](https://github.com/sindresorhus/meow) (CLI args)
 - [tsup](https://github.com/egoist/tsup) (ESM build)
+
+## Development
+
+```bash
+git clone https://github.com/gunubin/proclean.git
+cd proclean
+npm install && npm run build
+npm link
+```
 
 ## License
 
