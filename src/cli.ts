@@ -1,9 +1,9 @@
 import { spawn, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import meow from "meow";
-import { getOrphanProcesses } from "./lib/ps.js";
-import { devFilter, allFilter } from "./lib/filters.js";
-import type { Mode, ProcessInfo } from "./lib/types.js";
+import { scan, type Scan } from "./lib/orphans.js";
+import { killTrees } from "./lib/kill.js";
+import type { Mode, Orphan, Zombie } from "./lib/types.js";
 
 const cli = meow(
   `
@@ -55,46 +55,65 @@ function cpuColor(cpu: number): string {
   return "";
 }
 
+const home = process.env.HOME ?? "";
+const tilde = (path: string) => (home && path.startsWith(home) ? "~" + path.slice(home.length) : path);
+const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+
 function formatHeader(): string {
-  return `${c.dim}${"PID".padEnd(7)} ${"CPU%".padStart(5)}  ${"MEM".padStart(6)}  ${"ELAPSED".padStart(14)}  COMMAND${c.reset}`;
+  return `${c.dim}${"PID".padEnd(7)} ${"CPU%".padStart(5)}  ${"MEM".padStart(6)}  ${"ELAPSED".padStart(12)}  WHAT${c.reset}`;
 }
 
-function formatLine(proc: ProcessInfo, ttyOrphan = false): string {
-  const cpu = cpuColor(proc.cpu);
-  const cpuStr = proc.cpu.toFixed(1).padStart(5);
-  const mem = formatMem(proc.rss).padStart(6);
-  const elapsed = proc.elapsed.padStart(14);
-  const cmd =
-    proc.command.length > 50
-      ? proc.command.slice(0, 47) + "..."
-      : proc.command;
+/** node・python などは、実行しているスクリプト（パッケージ名とファイル名）を出す */
+function shortCommand(command: string): string {
+  const [exe, ...rest] = command.split(" ");
+  const base = exe.split("/").pop() ?? exe;
+  if (!/^(node|python[\d.]*|Python|java|bun|deno|ruby)$/.test(base) || rest.length === 0) return tilde(command);
+  const script = rest.find((a) => a.includes("/")) ?? rest.join(" ");
+  const pkg = script.match(/node_modules\/((?:@[^/]+\/)?[^/]+)/)?.[1];
+  const file = script.split("/").pop();
+  const args = rest.filter((a) => a !== script).join(" ");
+  return `${base} ${pkg ? `${pkg}/…/${file}` : tilde(script)}${args ? " " + args : ""}`;
+}
 
-  const line = [
-    `${c.bold}${String(proc.pid).padEnd(7)}${c.reset}`,
-    `${cpu}${cpuStr}${c.reset}`,
-    ` ${mem}`,
-    `  ${c.dim}${elapsed}${c.reset}`,
-    `  ${cmd}`,
+/** 何のプロセスかを短く。Claude の裏のセッションは作業フォルダ、それ以外はコマンドと作業フォルダ */
+function describe(o: Orphan): string {
+  const where = o.cwd && o.cwd !== "/" ? `${c.dim} · ${tilde(o.cwd)}${c.reset}` : "";
+  const ports = o.ports.length ? `${c.green}:${o.ports.join(",:")}${c.reset} ` : "";
+  const kids = o.descendants.length ? `${c.dim} (+${o.descendants.length})${c.reset}` : "";
+  if (o.kind === "claude-bg") return `${c.cyan}Claude bg session${c.reset}${kids}${where}`;
+  const cmd = clip(shortCommand(o.proc.command), 56);
+  const tty = o.kind === "tty" ? `${c.yellow}[${o.proc.tty}]${c.reset} ` : "";
+  return `${tty}${ports}${cmd}${kids}${where}`;
+}
+
+function formatLine(o: Orphan): string {
+  return [
+    `${c.bold}${String(o.proc.pid).padEnd(7)}${c.reset}`,
+    `${cpuColor(o.treeCpu)}${o.treeCpu.toFixed(1).padStart(5)}${c.reset}`,
+    `  ${formatMem(o.treeRss).padStart(6)}`,
+    `  ${c.dim}${o.proc.elapsed.padStart(12)}${c.reset}`,
+    `  ${describe(o)}`,
   ].join("");
-
-  // TTY-attached orphans: wrap entire line in yellow for visual distinction
-  return ttyOrphan ? `${c.yellow}${line}${c.reset}` : line;
 }
 
-function splitByTty(processes: ProcessInfo[]): {
-  normal: ProcessInfo[];
-  ttyAttached: ProcessInfo[];
-} {
-  const normal: ProcessInfo[] = [];
-  const ttyAttached: ProcessInfo[] = [];
-  for (const p of processes) {
-    if (p.tty === "??") {
-      normal.push(p);
-    } else {
-      ttyAttached.push(p);
-    }
+function formatZombie(z: Zombie): string {
+  const parent = z.parent ? `${z.parent.pid} ${clip(tilde(z.parent.command), 40)}` : String(z.proc.ppid);
+  // 先頭が数字でない行は kill の対象にしない（ゾンビは止められない。親が回収する）
+  return `${c.red}Z${c.reset}${c.dim}      ${String(z.proc.pid).padEnd(7)} zombie · parent ${parent}${c.reset}`;
+}
+
+function buildList(result: Scan): { text: string; label: string } {
+  const { orphans, zombies } = result;
+  const lines: string[] = [formatHeader()];
+  if (orphans.length === 0) lines.push(`${c.dim}  No orphan processes found.${c.reset}`);
+  lines.push(...orphans.map(formatLine));
+  if (zombies.length) {
+    lines.push(`${c.red}${c.bold}  ⚠ zombies (cannot be killed; stop or wait for the parent)${c.reset}`);
+    lines.push(...zombies.map(formatZombie));
   }
-  return { normal, ttyAttached };
+  const total = orphans.reduce((s, o) => s + o.treeRss, 0);
+  const label = ` ${orphans.length} orphans · ${formatMem(total)}${zombies.length ? ` · ${zombies.length} zombies` : ""} `;
+  return { text: lines.join("\n"), label };
 }
 
 // ── Wait for any keypress (raw mode) ─────────────────────
@@ -114,84 +133,68 @@ function waitForKey(): Promise<void> {
   });
 }
 
-// ── fzf preview command (wrapped in bash for fish compatibility) ──
-function buildPreviewCmd(): string {
-  const script = [
-    'pid=$1',
-    'case "$pid" in ""|*[!0-9]*) printf "\\n\\033[2m  Not a process line\\033[0m\\n"; exit 0 ;; esac',
-    'w=${FZF_PREVIEW_COLUMNS:-50}',
-    'hr() { printf "\\033[1;36m  "; printf "─%.0s" $(seq 1 $((w - 4))); printf "\\033[0m\\n"; }',
-    'section() { local t=" $1 "; local tl=${#t}; local rl=$((w - 4 - tl)); printf "\\033[1;36m  ─── %s " "$1"; printf "─%.0s" $(seq 1 $rl); printf "\\033[0m\\n"; }',
-    '',
-    'info=$(ps -p $pid -o pid=,ppid=,stat=,%cpu=,%mem=,rss=,lstart= 2>/dev/null)',
-    'if [ -z "$info" ]; then',
-    '  printf "\\033[31m  Process $pid no longer exists\\033[0m\\n"',
-    '  exit 0',
-    'fi',
-    '',
-    'etime=$(ps -p $pid -o etime= 2>/dev/null | sed "s/^ *//")',
-    'cpu=$(ps -p $pid -o %cpu= 2>/dev/null | sed "s/^ *//")',
-    'mem=$(ps -p $pid -o %mem= 2>/dev/null | sed "s/^ *//")',
-    'rss=$(ps -p $pid -o rss= 2>/dev/null | sed "s/^ *//")',
-    'stat=$(ps -p $pid -o stat= 2>/dev/null | sed "s/^ *//")',
-    'lstart=$(ps -p $pid -o lstart= 2>/dev/null | sed "s/^ *//")',
-    'rss_mb=$((rss / 1024))',
-    '',
-    'printf "\\n"',
-    'section "Process"',
-    'printf "\\033[2m  %-10s\\033[0;1m%s\\033[0m\\n" "PID" "$pid"',
-    'printf "\\033[2m  %-10s\\033[0m%s\\n" "PPID" "1 (orphan)"',
-    'printf "\\033[2m  %-10s\\033[0m%s\\n" "State" "$stat"',
-    'printf "\\033[2m  %-10s\\033[0m%s%%\\n" "CPU" "$cpu"',
-    'printf "\\033[2m  %-10s\\033[0m%s MB  (%s%%)\\n" "Memory" "$rss_mb" "$mem"',
-    'printf "\\033[2m  %-10s\\033[0m%s\\n" "Started" "$lstart"',
-    'printf "\\033[2m  %-10s\\033[0m%s\\n" "Elapsed" "$etime"',
-    'printf "\\n"',
-    '',
-    'cmd=$(ps -p $pid -o command= 2>/dev/null)',
-    'section "Command"',
-    'echo "  $cmd" | fold -s -w $((w - 4))',
-    'printf "\\n"',
-    '',
-    'nfiles=$(lsof -p $pid 2>/dev/null | wc -l | sed "s/^ *//")',
-    'if [ "$nfiles" -gt 0 ]; then',
-    '  section "Open Files ($nfiles)"',
-    '  lsof -p $pid -Fn 2>/dev/null | grep "^n/" | head -8 | sed "s/^n/  /"',
-    'fi',
-  ].join("\n");
-
-  return `bash -c '${script.replace(/'/g, "'\\''")}' -- {1}`;
-}
-
-// ── List mode (internal: outputs formatted list for fzf reload) ──
-async function listMode(mode: Mode): Promise<void> {
-  const all = await getOrphanProcesses();
-  const filter = mode === "dev" ? devFilter : allFilter;
-  const processes = all.filter(filter);
-  const { normal, ttyAttached } = splitByTty(processes);
-
-  const lines: string[] = [formatHeader()];
-  if (processes.length === 0) {
-    lines.push(`${c.dim}  No orphan processes found.${c.reset}`);
-  } else {
-    lines.push(...normal.map((p) => formatLine(p)));
-    if (ttyAttached.length > 0) {
-      lines.push(
-        `${c.yellow}${c.bold}  ⚠ TTY-attached orphans (may still be active)${c.reset}`,
-      );
-      lines.push(...ttyAttached.map((p) => formatLine(p, true)));
+// ── Preview（内部用: --_preview <pid>） ───────────────────
+async function previewMode(pidArg: string | undefined): Promise<void> {
+  const pid = Number(pidArg);
+  if (!Number.isInteger(pid) || pid <= 1) {
+    process.stdout.write(`\n${c.dim}  Not a process line${c.reset}\n`);
+    return;
+  }
+  const result = await scan(cli.flags.all ? "all" : "dev");
+  const o = result.orphans.find((x) => x.proc.pid === pid);
+  if (!o) {
+    process.stdout.write(`\n${c.red}  Process ${pid} no longer exists${c.reset}\n`);
+    return;
+  }
+  const kindText: Record<Orphan["kind"], string> = {
+    "claude-bg": "Claude Code の裏のセッション（ペインなし）",
+    server: "ポートを開いているサーバー（使用中かも）",
+    tty: "端末につながったまま（使用中かも）",
+    normal: "親のいないプロセス",
+  };
+  const row = (k: string, v: string) => `${c.dim}  ${k.padEnd(9)}${c.reset}${v}`;
+  const out = [
+    "",
+    `${c.cyan}${c.bold}  ── Process${c.reset}`,
+    row("PID", `${c.bold}${o.proc.pid}${c.reset}  (PPID 1)`),
+    row("Kind", kindText[o.kind]),
+    row("Memory", `${formatMem(o.treeRss)}  (self ${formatMem(o.proc.rss)} + ${o.descendants.length} children)`),
+    row("CPU", `${o.treeCpu.toFixed(1)}%`),
+    row("Elapsed", o.proc.elapsed),
+    row("Cwd", o.cwd ? tilde(o.cwd) : "-"),
+    row("Ports", o.ports.length ? o.ports.join(", ") : "-"),
+    "",
+    `${c.cyan}${c.bold}  ── Command${c.reset}`,
+    `  ${tilde(o.proc.command)}`,
+  ];
+  if (o.descendants.length) {
+    out.push("", `${c.cyan}${c.bold}  ── Children（Enter で一緒に止める）${c.reset}`);
+    for (const d of [...o.descendants].sort((a, b) => b.rss - a.rss).slice(0, 12)) {
+      out.push(`  ${String(d.pid).padEnd(7)} ${formatMem(d.rss).padStart(6)}  ${clip(tilde(d.command), 60)}`);
     }
   }
-  process.stdout.write(lines.join("\n") + "\n");
+  process.stdout.write(out.join("\n") + "\n");
 }
 
 // ── Main ──────────────────────────────────────────────────
 async function main() {
   const mode: Mode = cli.flags.all ? "all" : "dev";
 
-  // Internal --_list flag: output formatted list for fzf reload
+  // 内部用: fzf の reload・preview・kill から呼ばれる
   if (process.argv.includes("--_list")) {
-    await listMode(mode);
+    process.stdout.write(buildList(await scan(mode)).text + "\n");
+    return;
+  }
+  if (process.argv.includes("--_preview")) {
+    await previewMode(process.argv[process.argv.indexOf("--_preview") + 1]);
+    return;
+  }
+  if (process.argv.includes("--_kill")) {
+    const pids = process.argv
+      .slice(process.argv.indexOf("--_kill") + 1)
+      .map(Number)
+      .filter((n) => Number.isInteger(n) && n > 1);
+    await killTrees(pids);
     return;
   }
 
@@ -205,34 +208,10 @@ async function main() {
     process.exit(1);
   }
 
-  const all = await getOrphanProcesses();
-  const filter = mode === "dev" ? devFilter : allFilter;
-  const processes = all.filter(filter);
-  const { normal, ttyAttached } = splitByTty(processes);
-
-  // Build reload command for fzf
   const scriptPath = fileURLToPath(import.meta.url);
   const modeFlag = mode === "all" ? " -a" : "";
-  const reloadCmd = `node "${scriptPath}" --_list${modeFlag}`;
-
-  // Table header + data lines
-  const lines: string[] = [formatHeader()];
-  if (processes.length === 0) {
-    lines.push(`${c.dim}  No orphan processes found.${c.reset}`);
-  } else {
-    lines.push(...normal.map((p) => formatLine(p)));
-    if (ttyAttached.length > 0) {
-      lines.push(
-        `${c.yellow}${c.bold}  ⚠ TTY-attached orphans (may still be active)${c.reset}`,
-      );
-      lines.push(...ttyAttached.map((p) => formatLine(p, true)));
-    }
-  }
-  const input = lines.join("\n");
-  const listLabel =
-    processes.length === 0
-      ? " 0 orphan processes "
-      : ` ${processes.length} orphan processes `;
+  const self = `node "${scriptPath}"${modeFlag}`;
+  const { text: input, label: listLabel } = buildList(await scan(mode));
 
   // Spawn fzf (--style=full matching tmux popup conventions)
   const fzf = spawn(
@@ -247,9 +226,9 @@ async function main() {
       "--list-label",
       listLabel,
       "--header-label",
-      " TAB:select  Enter:kill  ^A:all  ^C:quit ",
+      " TAB:select  Enter:kill (with children)  ^R:reload  ^A:all  ^C:quit ",
       "--preview",
-      buildPreviewCmd(),
+      `${self} --_preview {1}`,
       "--preview-window",
       "right:48%:wrap",
       "--preview-label",
@@ -261,7 +240,9 @@ async function main() {
       "--bind",
       "ctrl-a:toggle-all",
       "--bind",
-      `enter:execute-silent(bash -c 'for p in {+1}; do case "$p" in ""|*[!0-9]*) continue ;; esac; kill -TERM $p 2>/dev/null; done; sleep 0.3; for p in {+1}; do case "$p" in ""|*[!0-9]*) continue ;; esac; kill -0 $p 2>/dev/null && kill -9 $p 2>/dev/null; done; sleep 0.1')+reload(${reloadCmd})`,
+      `enter:execute-silent(${self} --_kill {+1})+reload(${self} --_list)+clear-selection`,
+      "--bind",
+      `ctrl-r:reload(${self} --_list)`,
       "--color",
       "spinner:#F2D5CF,hl:#E78284",
       "--color",
