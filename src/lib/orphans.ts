@@ -30,6 +30,17 @@ function classify(proc: ProcessInfo, ports: number[]): OrphanKind {
   return "normal";
 }
 
+const ZOMBIE_MIN_AGE_S = 60;
+
+/** ps の etime（[[DD-]HH:]MM:SS）を秒に */
+export function elapsedSeconds(etime: string): number {
+  const [days, rest] = etime.includes("-") ? etime.split("-") : ["0", etime];
+  const parts = rest.split(":").map(Number);
+  while (parts.length < 3) parts.unshift(0);
+  const [h, m, sec] = parts;
+  return Number(days) * 86400 + h * 3600 + m * 60 + sec;
+}
+
 export interface Scan {
   orphans: Orphan[];
   zombies: Zombie[];
@@ -70,8 +81,9 @@ export async function scan(mode: Mode): Promise<Scan> {
 
   orphans.sort((a, b) => b.treeRss - a.treeRss);
 
+  // 終わった直後で親がまだ回収していないだけのゾンビ（数秒で消える）は出さない
   const zombies: Zombie[] = table
-    .filter((p) => p.stat.startsWith("Z"))
+    .filter((p) => p.stat.startsWith("Z") && elapsedSeconds(p.elapsed) >= ZOMBIE_MIN_AGE_S)
     .map((proc) => ({ proc, parent: byPid.get(proc.ppid) }));
 
   return { orphans, zombies };

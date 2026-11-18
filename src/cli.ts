@@ -96,10 +96,14 @@ function formatLine(o: Orphan): string {
   ].join("");
 }
 
-function formatZombie(z: Zombie): string {
-  const parent = z.parent ? `${z.parent.pid} ${clip(tilde(z.parent.command), 40)}` : String(z.proc.ppid);
-  // 先頭が数字でない行は kill の対象にしない（ゾンビは止められない。親が回収する）
-  return `${c.red}Z${c.reset}${c.dim}      ${String(z.proc.pid).padEnd(7)} zombie · parent ${parent}${c.reset}`;
+/** ゾンビは親ごとに 1 行にまとめる。先頭が数字でない行は kill の対象にしない（ゾンビは止められない。親が回収する） */
+function formatZombies(zombies: Zombie[]): string[] {
+  const byParent = new Map<number, Zombie[]>();
+  for (const z of zombies) byParent.set(z.proc.ppid, [...(byParent.get(z.proc.ppid) ?? []), z]);
+  return [...byParent.entries()].map(([ppid, list]) => {
+    const parent = list[0].parent ? clip(shortCommand(list[0].parent.command), 44) : "?";
+    return `${c.red}Z${c.reset}${c.dim}      ×${String(list.length).padEnd(5)} zombies · parent ${ppid} ${parent}${c.reset}`;
+  });
 }
 
 function buildList(result: Scan): { text: string; label: string } {
@@ -109,7 +113,7 @@ function buildList(result: Scan): { text: string; label: string } {
   lines.push(...orphans.map(formatLine));
   if (zombies.length) {
     lines.push(`${c.red}${c.bold}  ⚠ zombies (cannot be killed; stop or wait for the parent)${c.reset}`);
-    lines.push(...zombies.map(formatZombie));
+    lines.push(...formatZombies(zombies));
   }
   const total = orphans.reduce((s, o) => s + o.treeRss, 0);
   const label = ` ${orphans.length} orphans · ${formatMem(total)}${zombies.length ? ` · ${zombies.length} zombies` : ""} `;
@@ -240,9 +244,9 @@ async function main() {
       "--bind",
       "ctrl-a:toggle-all",
       "--bind",
-      `enter:execute-silent(${self} --_kill {+1})+reload(${self} --_list)+clear-selection`,
+      `enter:execute-silent(${self} --_kill {+1})+reload-sync(${self} --_list)+clear-selection+first`,
       "--bind",
-      `ctrl-r:reload(${self} --_list)`,
+      `ctrl-r:reload-sync(${self} --_list)+first`,
       "--color",
       "spinner:#F2D5CF,hl:#E78284",
       "--color",
