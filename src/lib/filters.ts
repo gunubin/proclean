@@ -12,6 +12,8 @@ export function isProtected(proc: ProcessInfo): boolean {
     /^(\S*\/)?op daemon/.test(cmd) ||
     /^(\S*\/)?adb .*fork-server/.test(cmd) ||
     /^(\S*\/)?(ssh-agent|gpg-agent)(\s|$)/.test(cmd) ||
+    // agent-device の共通の常駐（端末の操作で全部のセッションが使う）
+    /agent-device\/dist\/src\/internal\/daemon\.js/.test(cmd) ||
     /\.app\/Contents\/MacOS\/[^/]+$/.test(cmd.split(" -")[0])
   );
 }
