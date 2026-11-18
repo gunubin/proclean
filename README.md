@@ -17,7 +17,11 @@ Closing tmux panes often leaves subprocess orphans (Claude Code, node, cargo, et
 - **Two modes** -- `dev` (whitelist: Claude Code, node, cargo, rbenv) and `all` (blacklist: system processes only)
 - **fzf-powered UI** -- Fuzzy search, multi-select, real-time preview
 - **Detail preview** -- Process info, command line, open files in side pane
-- **Safe kill** -- SIGTERM with automatic list reload
+- **Kills the whole tree** -- children are stopped with the parent (no new orphans left behind), SIGTERM first, SIGKILL only after 3s
+- **Tree memory** -- MEM is the parent plus all children, sorted largest first
+- **Context** -- working directory, listening ports, Claude Code background sessions
+- **Protected** -- tmux/screen servers, `op daemon`, the adb server, agents and launchd jobs are never listed
+- **Zombies** -- shown separately (they cannot be killed; the parent has to reap them)
 - **Catppuccin Frappe theme** -- Consistent color scheme
 
 ## Prerequisites

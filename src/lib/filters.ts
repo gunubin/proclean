@@ -1,5 +1,21 @@
 import type { ProcessInfo } from "./types.js";
 
+/**
+ * 親が PID 1 でも、止めると困る常駐。どちらのモードでも出さない。
+ * tmux のサーバーを止めると全部のペインが消え、子ごと止める kill では被害がさらに広がる。
+ */
+export function isProtected(proc: ProcessInfo): boolean {
+  const cmd = proc.command;
+  return (
+    /^(\S*\/)?tmux(\s|$)/.test(cmd) ||
+    /^(\S*\/)?(zellij|screen)(\s|$)/.test(cmd) ||
+    /^(\S*\/)?op daemon/.test(cmd) ||
+    /^(\S*\/)?adb .*fork-server/.test(cmd) ||
+    /^(\S*\/)?(ssh-agent|gpg-agent)(\s|$)/.test(cmd) ||
+    /\.app\/Contents\/MacOS\/[^/]+$/.test(cmd.split(" -")[0])
+  );
+}
+
 /** dev mode: whitelist - only show known dev tool orphans */
 export function devFilter(proc: ProcessInfo): boolean {
   const cmd = proc.command;
@@ -9,7 +25,7 @@ export function devFilter(proc: ProcessInfo): boolean {
 
   // Node.js ecosystem
   if (cmd.includes(".npm")) return true;
-  if (cmd.includes(".nvm")) return true;
+  if (cmd.includes(".nvm") || cmd.includes("/nvm/")) return true;
   if (cmd.includes(".nodebrew")) return true;
 
   // Rust
@@ -41,6 +57,9 @@ export function devFilter(proc: ProcessInfo): boolean {
 
   // Claude-related (tmux watcher pattern: /tmp/claude-tmux/)
   if (cmd.includes("claude-tmux") || cmd.includes("claude_")) return true;
+
+  // Claude Code の裏のセッション（bg-pty-host）
+  if (/^claude\s/.test(cmd)) return true;
 
   // Shell spawned by Claude (.claude/ in command, started by bash/zsh)
   if (
